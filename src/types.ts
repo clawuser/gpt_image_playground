@@ -1,10 +1,13 @@
 // ===== 设置 =====
 
+export type ApiMode = 'images_api' | 'responses_api'
+
 export interface AppSettings {
   baseUrl: string
   apiKey: string
   model: string
   timeout: number
+  apiMode: ApiMode
 }
 
 const DEFAULT_BASE_URL = import.meta.env.VITE_DEFAULT_API_URL?.trim() || 'https://api.openai.com'
@@ -14,6 +17,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   apiKey: '',
   model: 'gpt-image-2',
   timeout: 300,
+  apiMode: 'images_api',
 }
 
 // ===== 任务参数 =====

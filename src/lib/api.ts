@@ -42,6 +42,62 @@ async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, signal:
   return blobToDataUrl(await response.blob(), fallbackMime)
 }
 
+function collectResponseApiImages(payload: unknown, fallbackMime: string): string[] {
+  const output =
+    payload && typeof payload === 'object' && Array.isArray((payload as { output?: unknown[] }).output)
+      ? (payload as { output: unknown[] }).output
+      : []
+
+  const images: string[] = []
+
+  for (const item of output) {
+    if (!item || typeof item !== 'object') continue
+
+    const record = item as {
+      type?: unknown
+      result?: unknown
+      image_base64?: unknown
+      content?: unknown
+    }
+
+    if (record.type === 'image_generation_call') {
+      if (typeof record.result === 'string' && record.result) {
+        images.push(normalizeBase64Image(record.result, fallbackMime))
+      } else if (Array.isArray(record.result)) {
+        for (const entry of record.result) {
+          if (typeof entry === 'string' && entry) {
+            images.push(normalizeBase64Image(entry, fallbackMime))
+          }
+        }
+      }
+
+      if (typeof record.image_base64 === 'string' && record.image_base64) {
+        images.push(normalizeBase64Image(record.image_base64, fallbackMime))
+      }
+    }
+
+    if (Array.isArray(record.content)) {
+      for (const contentItem of record.content) {
+        if (!contentItem || typeof contentItem !== 'object') continue
+        const contentRecord = contentItem as {
+          type?: unknown
+          image_base64?: unknown
+          result?: unknown
+        }
+
+        if (contentRecord.type === 'output_image' && typeof contentRecord.image_base64 === 'string') {
+          images.push(normalizeBase64Image(contentRecord.image_base64, fallbackMime))
+        }
+        if (contentRecord.type === 'image_generation_call' && typeof contentRecord.result === 'string') {
+          images.push(normalizeBase64Image(contentRecord.result, fallbackMime))
+        }
+      }
+    }
+  }
+
+  return images
+}
+
 export interface CallApiOptions {
   settings: AppSettings
   prompt: string
@@ -53,6 +109,7 @@ export interface CallApiOptions {
 export interface CallApiResult {
   /** base64 data URL 列表 */
   images: string[]
+  notice?: string
 }
 
 export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult> {
@@ -71,8 +128,28 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
 
   try {
     let response: Response
+    let notice: string | undefined
 
-    if (isEdit) {
+    if (settings.apiMode === 'responses_api' && !isEdit) {
+      response = await fetch(buildApiUrl(settings.baseUrl, 'responses', proxyConfig), {
+        method: 'POST',
+        headers: {
+          ...requestHeaders,
+          'Content-Type': 'application/json',
+        },
+        cache: 'no-store',
+        body: JSON.stringify({
+          model: settings.model,
+          input: prompt,
+          tools: [{ type: 'image_generation' }],
+        }),
+        signal: controller.signal,
+      })
+    } else if (isEdit) {
+      if (settings.apiMode === 'responses_api') {
+        notice = '当前是 Responses API 模式；参考图编辑已自动回落到 Images API。'
+      }
+
       const formData = new FormData()
       formData.append('model', settings.model)
       formData.append('prompt', prompt)
@@ -132,7 +209,10 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
     if (!response.ok) {
       let errorMsg = `HTTP ${response.status}`
       try {
-        const errJson = await response.json()
+        const errJson = await response.json() as {
+          error?: { message?: string }
+          message?: string
+        }
         if (errJson.error?.message) errorMsg = errJson.error.message
         else if (errJson.message) errorMsg = errJson.message
       } catch {
@@ -145,22 +225,27 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
       throw new Error(errorMsg)
     }
 
-    const payload = await response.json() as ImageApiResponse
-    const data = payload.data
-    if (!Array.isArray(data) || !data.length) {
-      throw new Error('接口未返回图片数据')
-    }
+    const payload = await response.json()
+    let images: string[] = []
 
-    const images: string[] = []
-    for (const item of data) {
-      const b64 = item.b64_json
-      if (b64) {
-        images.push(normalizeBase64Image(b64, mime))
-        continue
+    if (settings.apiMode === 'responses_api' && !isEdit) {
+      images = collectResponseApiImages(payload, mime)
+    } else {
+      const data = (payload as ImageApiResponse).data
+      if (!Array.isArray(data) || !data.length) {
+        throw new Error('接口未返回图片数据')
       }
 
-      if (isHttpUrl(item.url)) {
-        images.push(await fetchImageUrlAsDataUrl(item.url, mime, controller.signal))
+      for (const item of data) {
+        const b64 = item.b64_json
+        if (b64) {
+          images.push(normalizeBase64Image(b64, mime))
+          continue
+        }
+
+        if (isHttpUrl(item.url)) {
+          images.push(await fetchImageUrlAsDataUrl(item.url, mime, controller.signal))
+        }
       }
     }
 
@@ -168,7 +253,7 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
       throw new Error('接口未返回可用图片数据')
     }
 
-    return { images }
+    return { images, notice }
   } finally {
     clearTimeout(timeoutId)
   }

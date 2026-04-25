@@ -271,6 +271,10 @@ async function executeTask(taskId: string) {
       inputImageDataUrls: inputDataUrls,
     })
 
+    if (result.notice) {
+      useStore.getState().showToast(result.notice, 'info')
+    }
+
     // 存储输出图片
     const outputIds: string[] = []
     for (const dataUrl of result.images) {

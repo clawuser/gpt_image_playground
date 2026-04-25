@@ -32,7 +32,9 @@
 ## ✨ 功能特性
 
 ### 🎨 核心能力
-- **文本生图**：输入提示词，调用 `images/generations` 接口生成图片。
+- **文本生图**：支持两种模式：
+  - `images/generations`（传统 Images API）
+  - `responses + image_generation tool`（适合 `gpt-5.4` 这类 Responses 用法）
 - **参考图编辑**：支持上传最多 16 张参考图，调用 `images/edits` 接口进行图片编辑。支持文件选择、粘贴和拖拽三种方式。
 - **批量生成**：单次可设置生成多张图片。
 
@@ -73,7 +75,19 @@
 VITE_DEFAULT_API_URL=https://api.openai.com
 ```
 
-部署完成后，打开 Vercel 分配的域名，在页面右上角设置中填入 API Key 即可使用。
+部署完成后，打开站点，在页面右上角设置中填入 API Key 即可使用。
+
+如果你使用的是类似下面这种 Python 调法：
+
+```python
+response = client.responses.create(
+  model="gpt-5.4",
+  input="创建一个风和日丽，天气晴的场景，舒适清爽,日漫风格",
+  tools=[{"type": "image_generation"}]
+)
+```
+
+请在页面设置里把 **API 模式** 切到 **Responses API**，模型填 `gpt-5.4`。
 
 **更新说明：**
 
@@ -198,9 +212,17 @@ docker compose up -d
 ## 🛠️ API 配置说明
 
 点击页面右上角的设置图标，你可以随时更改 API 相关的配置。
+
+### API 模式
+
+- **Images API**：传统 OpenAI 图片接口，支持文本生图 + 参考图编辑
+- **Responses API**：适合 `gpt-5.4 + image_generation tool` 这种调用方式；当前文本生图走 `/v1/responses`
+- 当你在 **Responses API** 模式下上传参考图时，应用会自动回落到 **Images API 的编辑接口**，不用手动切回去
+
 应用支持通过 URL 查询参数快速填充配置，非常适合书签或分享给他人使用：
 - `?apiUrl=https://你的代理地址.com`
 - `?apiKey=sk-xxxx`
+- `?apiMode=responses_api`
 
 例如：
 - 接入 New API 聊天应用：

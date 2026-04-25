@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { normalizeBaseUrl } from '../lib/api'
 import { useStore, exportData, importData, clearAllData } from '../store'
-import { DEFAULT_SETTINGS, type AppSettings } from '../types'
+import { DEFAULT_SETTINGS, type AppSettings, type ApiMode } from '../types'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
+import Select from './Select'
 
 export default function SettingsModal() {
   const showSettings = useStore((s) => s.showSettings)
@@ -155,6 +156,22 @@ export default function SettingsModal() {
                   支持通过查询参数覆盖：<code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">?apiKey=</code>
                 </div>
               </div>
+
+              <label className="block">
+                <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">API 模式</span>
+                <Select
+                  value={draft.apiMode}
+                  onChange={(value) => commitSettings({ ...draft, apiMode: value as ApiMode })}
+                  options={[
+                    { label: 'Images API（传统生图 / 编辑）', value: 'images_api' },
+                    { label: 'Responses API（适合 gpt-5.4 + image_generation）', value: 'responses_api' },
+                  ]}
+                  className="px-3 py-2 rounded-xl border border-gray-200/70 bg-white/60 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
+                />
+                <div className="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
+                  Images API 支持常规生图和参考图编辑；Responses API 适合你这种 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">gpt-5.4 + image_generation</code> 用法。
+                </div>
+              </label>
 
               <label className="block">
                 <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">模型 ID</span>
