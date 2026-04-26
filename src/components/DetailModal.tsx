@@ -175,6 +175,41 @@ export default function DetailModal() {
     }
   }
 
+  const handleDownloadCurrentOutput = async () => {
+    if (!currentOutputImageSrc) return
+    try {
+      const res = await fetch(currentOutputImageSrc)
+      const blob = await res.blob()
+      const ext = blob.type.split('/')[1] || 'png'
+      const file = new File([blob], `image-${Date.now()}.${ext}`, {
+        type: blob.type || 'image/png',
+      })
+
+      if (navigator.share && navigator.canShare?.({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: '下载图片',
+        })
+        showToast('已打开系统分享面板', 'success')
+        return
+      }
+
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = file.name
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      showToast('开始下载', 'success')
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return
+      console.error(err)
+      showToast('下载失败', 'error')
+    }
+  }
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
@@ -240,6 +275,17 @@ export default function DetailModal() {
                   )
                 )}
               </div>
+              <button
+                type="button"
+                onClick={handleDownloadCurrentOutput}
+                className="absolute top-3 right-3 inline-flex items-center gap-1 rounded-full bg-black/50 px-3 py-1.5 text-xs text-white backdrop-blur-sm transition hover:bg-black/65"
+                title="下载图片"
+              >
+                <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+                下载
+              </button>
               {outputLen > 1 && (
                 <>
                   <button

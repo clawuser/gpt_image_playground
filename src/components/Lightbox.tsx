@@ -86,6 +86,7 @@ interface LightboxInnerProps {
 
 /** 内部组件：保证挂载时 DOM 已经存在，所有 ref / effect 都可靠 */
 function LightboxInner({ src, onClose, showNav, currentIndex, total, onPrev, onNext }: LightboxInnerProps) {
+  const showToast = useStore((s) => s.showToast)
   const containerRef = useRef<HTMLDivElement>(null)
 
   // 用 ref 追踪最新变换，避免闭包过期
@@ -384,6 +385,38 @@ function LightboxInner({ src, onClose, showNav, currentIndex, total, onPrev, onN
   const navBtnClass =
     'absolute top-1/2 -translate-y-1/2 p-2 rounded-full bg-black/40 text-white hover:bg-black/60 transition-all z-10 backdrop-blur-sm'
 
+  const handleDownload = useCallback(async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    try {
+      const res = await fetch(src)
+      const blob = await res.blob()
+      const ext = blob.type.split('/')[1] || 'png'
+      const file = new File([blob], `image-${Date.now()}.${ext}`, {
+        type: blob.type || 'image/png',
+      })
+
+      if (navigator.share && navigator.canShare?.({ files: [file] })) {
+        await navigator.share({ files: [file], title: '下载图片' })
+        showToast('已打开系统分享面板', 'success')
+        return
+      }
+
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = file.name
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      showToast('开始下载', 'success')
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return
+      console.error(err)
+      showToast('下载失败', 'error')
+    }
+  }, [showToast, src])
+
   return (
     <div
       ref={containerRef}
@@ -407,6 +440,18 @@ function LightboxInner({ src, onClose, showNav, currentIndex, total, onPrev, onN
           alt=""
         />
       </div>
+
+      <button
+        type="button"
+        onClick={handleDownload}
+        className="absolute top-4 right-4 z-10 inline-flex items-center gap-1 rounded-full bg-black/50 px-3 py-1.5 text-xs text-white backdrop-blur-sm transition hover:bg-black/65"
+        title="下载图片"
+      >
+        <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+        </svg>
+        下载
+      </button>
 
       {/* 左右切换按钮 */}
       {showNav && !isZoomed && (
