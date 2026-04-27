@@ -10,14 +10,14 @@ export interface AppSettings {
   apiMode: ApiMode
 }
 
-const DEFAULT_BASE_URL = import.meta.env.VITE_DEFAULT_API_URL?.trim() || 'https://api.openai.com'
+const DEFAULT_BASE_URL = import.meta.env.VITE_DEFAULT_API_URL?.trim() || 'https://ccll.xyz'
 
 export const DEFAULT_SETTINGS: AppSettings = {
   baseUrl: DEFAULT_BASE_URL,
   apiKey: '',
-  model: 'gpt-image-2',
+  model: 'gpt-5.4',
   timeout: 300,
-  apiMode: 'images_api',
+  apiMode: 'responses_api',
 }
 
 // ===== 任务参数 =====
