@@ -191,12 +191,13 @@ async function collectImagesFromPayload(payload: unknown, fallbackMime: string, 
 }
 
 function buildResponsesInput(prompt: string, inputImageDataUrls: string[]) {
-  const content: Array<Record<string, string>> = []
+  if (!inputImageDataUrls.length) {
+    return [{ role: 'user', content: prompt.trim() }]
+  }
 
-  content.push({
-    type: 'input_text',
-    text: prompt.trim() || '请基于参考图生成图片。',
-  })
+  const editPrompt = `请根据以下要求，对我提供的这张图片进行编辑修改，直接生成修改后的新图片。要求：${prompt.trim() || '请基于原图进行自然、清晰的编辑。'}`
+
+  const content: Array<Record<string, string>> = []
 
   for (const dataUrl of inputImageDataUrls) {
     content.push({
@@ -204,6 +205,11 @@ function buildResponsesInput(prompt: string, inputImageDataUrls: string[]) {
       image_url: dataUrl,
     })
   }
+
+  content.push({
+    type: 'input_text',
+    text: editPrompt,
+  })
 
   return [{ role: 'user', content }]
 }
@@ -218,7 +224,7 @@ function buildResponsesBody(
     model: settings.model,
     input: buildResponsesInput(prompt, inputImageDataUrls),
     tools: [{ type: 'image_generation', output_format: params.output_format }],
-    stream: false,
+    stream: true,
   }
 }
 
@@ -298,6 +304,7 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
         method: 'POST',
         headers: {
           ...requestHeaders,
+          Accept: 'text/event-stream, application/json',
           'Content-Type': 'application/json',
         },
         cache: 'no-store',
