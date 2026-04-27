@@ -169,7 +169,7 @@ export default function SettingsModal() {
                   className="px-3 py-2 rounded-xl border border-gray-200/70 bg-white/60 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
                 />
                 <div className="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
-                  Images API 支持常规生图和参考图编辑；Responses API 适合你这种 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">gpt-5.4 + image_generation</code> 用法。
+                  Images API 支持常规生图和参考图编辑；Responses API 适合你这种 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">gpt-5.4 + image_generation</code> 用法，且现在会优先尝试带图输入，失败时自动回落到传统编辑接口。
                 </div>
               </label>
 

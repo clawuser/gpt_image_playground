@@ -344,9 +344,9 @@ export default function InputBar() {
 
   const renderParams = (cols: string) => (
     <div className={`grid ${cols} gap-2 text-xs flex-1`}>
-      {settings.apiMode === 'responses_api' && !inputImages.length && (
+      {settings.apiMode === 'responses_api' && (
         <div className="col-span-full rounded-xl border border-amber-200/70 bg-amber-50/70 px-3 py-2 text-[11px] text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300">
-          当前为 Responses API 模式：文本生图会走 <code>/v1/responses + image_generation</code>；下方尺寸/质量等参数可能不会全部生效。
+          当前为 Responses API 模式：文本生图会走 <code>/v1/responses + image_generation</code>；如果带参考图，会优先尝试 Responses 图生图，失败时再自动回落到传统编辑接口。
         </div>
       )}
       <label className="flex flex-col gap-0.5">

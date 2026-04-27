@@ -7,14 +7,49 @@ const MIME_MAP: Record<string, string> = {
   webp: 'image/webp',
 }
 
+const BASE64_IMAGE_PREFIXES = ['data:image/', 'iVBOR', '/9j/', 'UklGR', 'R0lGOD', 'Qk']
+
 export { normalizeBaseUrl } from './devProxy'
 
 function isHttpUrl(value: unknown): value is string {
   return typeof value === 'string' && /^https?:\/\//i.test(value)
 }
 
+function isLikelyImageUrl(value: string): boolean {
+  return /\.(png|jpe?g|webp|gif|bmp|svg)(?:[?#].*)?$/i.test(value)
+}
+
+function looksLikeJsonString(value: string): boolean {
+  const trimmed = value.trim()
+  return (
+    (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+    (trimmed.startsWith('[') && trimmed.endsWith(']'))
+  )
+}
+
 function normalizeBase64Image(value: string, fallbackMime: string): string {
-  return value.startsWith('data:') ? value : `data:${fallbackMime};base64,${value}`
+  const trimmed = value.trim()
+  if (trimmed.startsWith('data:')) return trimmed
+  return `data:${fallbackMime};base64,${trimmed.replace(/\s+/g, '')}`
+}
+
+function looksLikeBase64Image(value: string): boolean {
+  const trimmed = value.trim()
+  if (!trimmed) return false
+
+  if (BASE64_IMAGE_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) {
+    return true
+  }
+
+  const compact = trimmed.replace(/\s+/g, '')
+  return compact.length > 512 && /^[A-Za-z0-9+/]+=*$/.test(compact)
+}
+
+function maybeNormalizeImageString(value: string, fallbackMime: string): string | null {
+  if (!value) return null
+  if (value.startsWith('data:image/')) return value.trim()
+  if (looksLikeBase64Image(value)) return normalizeBase64Image(value, fallbackMime)
+  return null
 }
 
 async function blobToDataUrl(blob: Blob, fallbackMime: string): Promise<string> {
@@ -42,60 +77,186 @@ async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, signal:
   return blobToDataUrl(await response.blob(), fallbackMime)
 }
 
-function collectResponseApiImages(payload: unknown, fallbackMime: string): string[] {
-  const output =
-    payload && typeof payload === 'object' && Array.isArray((payload as { output?: unknown[] }).output)
-      ? (payload as { output: unknown[] }).output
-      : []
+function parseLooseTextPayload(text: string): unknown {
+  const trimmed = text.trim()
+  if (!trimmed) return null
 
-  const images: string[] = []
-
-  for (const item of output) {
-    if (!item || typeof item !== 'object') continue
-
-    const record = item as {
-      type?: unknown
-      result?: unknown
-      image_base64?: unknown
-      content?: unknown
-    }
-
-    if (record.type === 'image_generation_call') {
-      if (typeof record.result === 'string' && record.result) {
-        images.push(normalizeBase64Image(record.result, fallbackMime))
-      } else if (Array.isArray(record.result)) {
-        for (const entry of record.result) {
-          if (typeof entry === 'string' && entry) {
-            images.push(normalizeBase64Image(entry, fallbackMime))
-          }
-        }
-      }
-
-      if (typeof record.image_base64 === 'string' && record.image_base64) {
-        images.push(normalizeBase64Image(record.image_base64, fallbackMime))
-      }
-    }
-
-    if (Array.isArray(record.content)) {
-      for (const contentItem of record.content) {
-        if (!contentItem || typeof contentItem !== 'object') continue
-        const contentRecord = contentItem as {
-          type?: unknown
-          image_base64?: unknown
-          result?: unknown
-        }
-
-        if (contentRecord.type === 'output_image' && typeof contentRecord.image_base64 === 'string') {
-          images.push(normalizeBase64Image(contentRecord.image_base64, fallbackMime))
-        }
-        if (contentRecord.type === 'image_generation_call' && typeof contentRecord.result === 'string') {
-          images.push(normalizeBase64Image(contentRecord.result, fallbackMime))
-        }
-      }
+  if (looksLikeJsonString(trimmed)) {
+    try {
+      return JSON.parse(trimmed)
+    } catch {
+      /* ignore */
     }
   }
 
-  return images
+  const sseEvents: unknown[] = []
+  for (const line of trimmed.split(/\r?\n/)) {
+    const match = line.match(/^data:\s*(.+)$/)
+    if (!match) continue
+
+    const data = match[1].trim()
+    if (!data || data === '[DONE]') continue
+
+    try {
+      sseEvents.push(JSON.parse(data))
+    } catch {
+      /* ignore */
+    }
+  }
+
+  if (sseEvents.length === 1) return sseEvents[0]
+  if (sseEvents.length > 1) return { output: sseEvents }
+
+  return trimmed
+}
+
+async function readResponsePayload(response: Response): Promise<unknown> {
+  const contentType = response.headers.get('content-type') || ''
+
+  if (contentType.includes('application/json')) {
+    return response.json()
+  }
+
+  return parseLooseTextPayload(await response.text())
+}
+
+async function collectImagesFromPayload(payload: unknown, fallbackMime: string, signal: AbortSignal): Promise<string[]> {
+  const dataUrls: string[] = []
+  const remoteUrls: string[] = []
+  const seenStrings = new Set<string>()
+  const seenNodes = new WeakSet<object>()
+
+  const pushImageString = (value: string) => {
+    if (seenStrings.has(value)) return
+    seenStrings.add(value)
+    dataUrls.push(value)
+  }
+
+  const pushRemoteUrl = (value: string) => {
+    if (seenStrings.has(value)) return
+    seenStrings.add(value)
+    remoteUrls.push(value)
+  }
+
+  const visit = (node: unknown, keyHint = ''): void => {
+    if (typeof node === 'string') {
+      const normalized = maybeNormalizeImageString(node, fallbackMime)
+      if (normalized) {
+        pushImageString(normalized)
+        return
+      }
+
+      if (looksLikeJsonString(node)) {
+        try {
+          visit(JSON.parse(node), keyHint)
+          return
+        } catch {
+          /* ignore */
+        }
+      }
+
+      const lowerKey = keyHint.toLowerCase()
+      if (
+        isHttpUrl(node) &&
+        (isLikelyImageUrl(node) || /(^|_)(url|imageurl|image_url|resulturl|result_url)$/.test(lowerKey) || lowerKey.includes('image'))
+      ) {
+        pushRemoteUrl(node)
+      }
+      return
+    }
+
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        visit(item, keyHint)
+      }
+      return
+    }
+
+    if (!node || typeof node !== 'object') return
+    if (seenNodes.has(node)) return
+    seenNodes.add(node)
+
+    for (const [key, value] of Object.entries(node)) {
+      visit(value, key)
+    }
+  }
+
+  visit(payload)
+
+  for (const url of remoteUrls) {
+    dataUrls.push(await fetchImageUrlAsDataUrl(url, fallbackMime, signal))
+  }
+
+  return dataUrls
+}
+
+function buildResponsesInput(prompt: string, inputImageDataUrls: string[]) {
+  const content: Array<Record<string, string>> = []
+
+  content.push({
+    type: 'input_text',
+    text: prompt.trim() || '请基于参考图生成图片。',
+  })
+
+  for (const dataUrl of inputImageDataUrls) {
+    content.push({
+      type: 'input_image',
+      image_url: dataUrl,
+    })
+  }
+
+  return [{ role: 'user', content }]
+}
+
+function buildResponsesBody(
+  settings: AppSettings,
+  prompt: string,
+  params: TaskParams,
+  inputImageDataUrls: string[],
+): Record<string, unknown> {
+  return {
+    model: settings.model,
+    input: buildResponsesInput(prompt, inputImageDataUrls),
+    tools: [{ type: 'image_generation', output_format: params.output_format }],
+    stream: false,
+  }
+}
+
+function shouldFallbackResponsesEdit(response: Response): boolean {
+  return response.status >= 500 || [400, 404, 405, 415, 422, 501].includes(response.status)
+}
+
+async function buildImageEditFormData(
+  settings: AppSettings,
+  prompt: string,
+  params: TaskParams,
+  inputImageDataUrls: string[],
+): Promise<FormData> {
+  const formData = new FormData()
+  formData.append('model', settings.model)
+  formData.append('prompt', prompt)
+  formData.append('size', params.size)
+  formData.append('quality', params.quality)
+  formData.append('output_format', params.output_format)
+  formData.append('moderation', params.moderation)
+
+  if (params.output_format !== 'png' && params.output_compression != null) {
+    formData.append('output_compression', String(params.output_compression))
+  }
+
+  for (let i = 0; i < inputImageDataUrls.length; i++) {
+    const dataUrl = inputImageDataUrls[i]
+    const resp = await fetch(dataUrl)
+    const blob = await resp.blob()
+    const ext = blob.type.split('/')[1] || 'png'
+
+    if (i === 0) {
+      formData.append('image', blob, `input-${i + 1}.${ext}`)
+    }
+    formData.append('image[]', blob, `input-${i + 1}.${ext}`)
+  }
+
+  return formData
 }
 
 export interface CallApiOptions {
@@ -129,8 +290,10 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
   try {
     let response: Response
     let notice: string | undefined
+    let responsePath: 'responses' | 'images' = 'images'
 
-    if (settings.apiMode === 'responses_api' && !isEdit) {
+    if (settings.apiMode === 'responses_api') {
+      responsePath = 'responses'
       response = await fetch(buildApiUrl(settings.baseUrl, 'responses', proxyConfig), {
         method: 'POST',
         headers: {
@@ -138,38 +301,24 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
           'Content-Type': 'application/json',
         },
         cache: 'no-store',
-        body: JSON.stringify({
-          model: settings.model,
-          input: prompt,
-          tools: [{ type: 'image_generation' }],
-        }),
+        body: JSON.stringify(buildResponsesBody(settings, prompt, params, inputImageDataUrls)),
         signal: controller.signal,
       })
+
+      if (isEdit && !response.ok && shouldFallbackResponsesEdit(response)) {
+        responsePath = 'images'
+        notice = 'Responses API 图生图失败，已自动回落到 Images API。'
+        const formData = await buildImageEditFormData(settings, prompt, params, inputImageDataUrls)
+        response = await fetch(buildApiUrl(settings.baseUrl, 'images/edits', proxyConfig), {
+          method: 'POST',
+          headers: requestHeaders,
+          cache: 'no-store',
+          body: formData,
+          signal: controller.signal,
+        })
+      }
     } else if (isEdit) {
-      if (settings.apiMode === 'responses_api') {
-        notice = '当前是 Responses API 模式；参考图编辑已自动回落到 Images API。'
-      }
-
-      const formData = new FormData()
-      formData.append('model', settings.model)
-      formData.append('prompt', prompt)
-      formData.append('size', params.size)
-      formData.append('quality', params.quality)
-      formData.append('output_format', params.output_format)
-      formData.append('moderation', params.moderation)
-
-      if (params.output_format !== 'png' && params.output_compression != null) {
-        formData.append('output_compression', String(params.output_compression))
-      }
-
-      for (let i = 0; i < inputImageDataUrls.length; i++) {
-        const dataUrl = inputImageDataUrls[i]
-        const resp = await fetch(dataUrl)
-        const blob = await resp.blob()
-        const ext = blob.type.split('/')[1] || 'png'
-        formData.append('image[]', blob, `input-${i + 1}.${ext}`)
-      }
-
+      const formData = await buildImageEditFormData(settings, prompt, params, inputImageDataUrls)
       response = await fetch(buildApiUrl(settings.baseUrl, 'images/edits', proxyConfig), {
         method: 'POST',
         headers: requestHeaders,
@@ -209,43 +358,47 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
     if (!response.ok) {
       let errorMsg = `HTTP ${response.status}`
       try {
-        const errJson = await response.json() as {
-          error?: { message?: string }
-          message?: string
+        const errPayload = await readResponsePayload(response)
+        if (errPayload && typeof errPayload === 'object') {
+          const errJson = errPayload as {
+            error?: { message?: string }
+            message?: string
+          }
+          if (errJson.error?.message) errorMsg = errJson.error.message
+          else if (errJson.message) errorMsg = errJson.message
+          else errorMsg = JSON.stringify(errJson)
+        } else if (typeof errPayload === 'string' && errPayload.trim()) {
+          errorMsg = errPayload
         }
-        if (errJson.error?.message) errorMsg = errJson.error.message
-        else if (errJson.message) errorMsg = errJson.message
       } catch {
-        try {
-          errorMsg = await response.text()
-        } catch {
-          /* ignore */
-        }
+        /* ignore */
       }
       throw new Error(errorMsg)
     }
 
-    const payload = await response.json()
+    const payload = await readResponsePayload(response)
     let images: string[] = []
 
-    if (settings.apiMode === 'responses_api' && !isEdit) {
-      images = collectResponseApiImages(payload, mime)
+    if (responsePath === 'responses') {
+      images = await collectImagesFromPayload(payload, mime, controller.signal)
     } else {
-      const data = (payload as ImageApiResponse).data
-      if (!Array.isArray(data) || !data.length) {
-        throw new Error('接口未返回图片数据')
+      const data = (payload as ImageApiResponse | null)?.data
+      if (Array.isArray(data) && data.length) {
+        for (const item of data) {
+          const b64 = item.b64_json
+          if (b64) {
+            images.push(normalizeBase64Image(b64, mime))
+            continue
+          }
+
+          if (isHttpUrl(item.url)) {
+            images.push(await fetchImageUrlAsDataUrl(item.url, mime, controller.signal))
+          }
+        }
       }
 
-      for (const item of data) {
-        const b64 = item.b64_json
-        if (b64) {
-          images.push(normalizeBase64Image(b64, mime))
-          continue
-        }
-
-        if (isHttpUrl(item.url)) {
-          images.push(await fetchImageUrlAsDataUrl(item.url, mime, controller.signal))
-        }
+      if (!images.length) {
+        images = await collectImagesFromPayload(payload, mime, controller.signal)
       }
     }
 
