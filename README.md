@@ -218,6 +218,8 @@ docker compose up -d
 - **Images API**：传统 OpenAI 图片接口，支持文本生图 + 参考图编辑
 - **Responses API**：适合 `gpt-5.4 + image_generation tool` 这种调用方式；当前文本生图走 `/v1/responses`
 - 当你在 **Responses API** 模式下上传参考图时，应用会自动回落到 **Images API 的编辑接口**，不用手动切回去
+- 为了提升稳定性，前端现在会优先按 OpenAI 官方文档解析 `b64_json`，并兼容部分代理返回的 `url`、SSE 事件流，或直接返回 `image/png` / `image/jpeg` 二进制图片
+- 对 `429 / 5xx / Failed to fetch / Load failed` 这类瞬时问题，前端会自动做短退避重试，减少偶发失败
 
 应用支持通过 URL 查询参数快速填充配置，非常适合书签或分享给他人使用：
 - `?apiUrl=https://你的代理地址.com`

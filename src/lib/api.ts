@@ -8,6 +8,8 @@ const MIME_MAP: Record<string, string> = {
 }
 
 const BASE64_IMAGE_PREFIXES = ['data:image/', 'iVBOR', '/9j/', 'UklGR', 'R0lGOD', 'Qk']
+const RETRYABLE_STATUS_CODES = new Set([408, 409, 425, 429, 500, 502, 503, 504])
+const RETRY_DELAYS_MS = [800, 1600]
 
 export { normalizeBaseUrl } from './devProxy'
 
@@ -64,11 +66,67 @@ async function blobToDataUrl(blob: Blob, fallbackMime: string): Promise<string> 
   return `data:${blob.type || fallbackMime};base64,${btoa(binary)}`
 }
 
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function shouldRetryError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const message = error.message.toLowerCase()
+  return message === 'failed to fetch' || message.includes('networkerror') || message.includes('load failed')
+}
+
+function shouldRetryResponse(response: Response): boolean {
+  return RETRYABLE_STATUS_CODES.has(response.status)
+}
+
+async function fetchWithRetry(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  signal: AbortSignal,
+): Promise<Response> {
+  let lastError: unknown
+
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    if (signal.aborted) {
+      throw new DOMException('The operation was aborted.', 'AbortError')
+    }
+
+    try {
+      const response = await fetch(input, {
+        ...init,
+        signal,
+      })
+
+      if (!shouldRetryResponse(response) || attempt === RETRY_DELAYS_MS.length) {
+        return response
+      }
+    } catch (error) {
+      if (isAbortError(error)) throw error
+      lastError = error
+      if (!shouldRetryError(error) || attempt === RETRY_DELAYS_MS.length) {
+        throw error
+      }
+    }
+
+    await sleep(RETRY_DELAYS_MS[attempt])
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('请求失败')
+}
+
 async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, signal: AbortSignal): Promise<string> {
-  const response = await fetch(url, {
-    cache: 'no-store',
+  const response = await fetchWithRetry(
+    url,
+    {
+      cache: 'no-store',
+    },
     signal,
-  })
+  )
 
   if (!response.ok) {
     throw new Error(`图片 URL 下载失败：HTTP ${response.status}`)
@@ -110,11 +168,19 @@ function parseLooseTextPayload(text: string): unknown {
   return trimmed
 }
 
-async function readResponsePayload(response: Response): Promise<unknown> {
+async function readResponsePayload(response: Response, fallbackMime = 'image/png'): Promise<unknown> {
   const contentType = response.headers.get('content-type') || ''
 
   if (contentType.includes('application/json')) {
     return response.json()
+  }
+
+  if (contentType.startsWith('image/')) {
+    return {
+      data: [{
+        b64_json: (await blobToDataUrl(await response.blob(), fallbackMime)).split(',', 2)[1] || '',
+      }],
+    }
   }
 
   return parseLooseTextPayload(await response.text())
@@ -223,8 +289,12 @@ function buildResponsesBody(
   return {
     model: settings.model,
     input: buildResponsesInput(prompt, inputImageDataUrls),
-    tools: [{ type: 'image_generation', output_format: params.output_format }],
-    stream: true,
+    tools: [{
+      type: 'image_generation',
+      output_format: params.output_format,
+      action: inputImageDataUrls.length ? 'auto' : 'generate',
+    }],
+    stream: false,
   }
 }
 
@@ -300,39 +370,48 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
 
     if (settings.apiMode === 'responses_api') {
       responsePath = 'responses'
-      response = await fetch(buildApiUrl(settings.baseUrl, 'responses', proxyConfig), {
-        method: 'POST',
-        headers: {
-          ...requestHeaders,
-          Accept: 'text/event-stream, application/json',
-          'Content-Type': 'application/json',
+      response = await fetchWithRetry(
+        buildApiUrl(settings.baseUrl, 'responses', proxyConfig),
+        {
+          method: 'POST',
+          headers: {
+            ...requestHeaders,
+            Accept: 'application/json, text/event-stream, image/*',
+            'Content-Type': 'application/json',
+          },
+          cache: 'no-store',
+          body: JSON.stringify(buildResponsesBody(settings, prompt, params, inputImageDataUrls)),
         },
-        cache: 'no-store',
-        body: JSON.stringify(buildResponsesBody(settings, prompt, params, inputImageDataUrls)),
-        signal: controller.signal,
-      })
+        controller.signal,
+      )
 
       if (isEdit && !response.ok && shouldFallbackResponsesEdit(response)) {
         responsePath = 'images'
         notice = 'Responses API 图生图失败，已自动回落到 Images API。'
         const formData = await buildImageEditFormData(settings, prompt, params, inputImageDataUrls)
-        response = await fetch(buildApiUrl(settings.baseUrl, 'images/edits', proxyConfig), {
+        response = await fetchWithRetry(
+          buildApiUrl(settings.baseUrl, 'images/edits', proxyConfig),
+          {
+            method: 'POST',
+            headers: requestHeaders,
+            cache: 'no-store',
+            body: formData,
+          },
+          controller.signal,
+        )
+      }
+    } else if (isEdit) {
+      const formData = await buildImageEditFormData(settings, prompt, params, inputImageDataUrls)
+      response = await fetchWithRetry(
+        buildApiUrl(settings.baseUrl, 'images/edits', proxyConfig),
+        {
           method: 'POST',
           headers: requestHeaders,
           cache: 'no-store',
           body: formData,
-          signal: controller.signal,
-        })
-      }
-    } else if (isEdit) {
-      const formData = await buildImageEditFormData(settings, prompt, params, inputImageDataUrls)
-      response = await fetch(buildApiUrl(settings.baseUrl, 'images/edits', proxyConfig), {
-        method: 'POST',
-        headers: requestHeaders,
-        cache: 'no-store',
-        body: formData,
-        signal: controller.signal,
-      })
+        },
+        controller.signal,
+      )
     } else {
       const body: Record<string, unknown> = {
         model: settings.model,
@@ -350,30 +429,38 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
         body.n = params.n
       }
 
-      response = await fetch(buildApiUrl(settings.baseUrl, 'images/generations', proxyConfig), {
-        method: 'POST',
-        headers: {
-          ...requestHeaders,
-          'Content-Type': 'application/json',
+      response = await fetchWithRetry(
+        buildApiUrl(settings.baseUrl, 'images/generations', proxyConfig),
+        {
+          method: 'POST',
+          headers: {
+            ...requestHeaders,
+            Accept: 'application/json, image/*',
+            'Content-Type': 'application/json',
+          },
+          cache: 'no-store',
+          body: JSON.stringify(body),
         },
-        cache: 'no-store',
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      })
+        controller.signal,
+      )
     }
 
     if (!response.ok) {
       let errorMsg = `HTTP ${response.status}`
       try {
-        const errPayload = await readResponsePayload(response)
+        const errPayload = await readResponsePayload(response, mime)
         if (errPayload && typeof errPayload === 'object') {
           const errJson = errPayload as {
-            error?: { message?: string }
+            error?: { message?: string; type?: string; code?: string }
             message?: string
           }
           if (errJson.error?.message) errorMsg = errJson.error.message
           else if (errJson.message) errorMsg = errJson.message
           else errorMsg = JSON.stringify(errJson)
+
+          if (errJson.error?.type || errJson.error?.code) {
+            errorMsg += ` (${[errJson.error.type, errJson.error.code].filter(Boolean).join(' / ')})`
+          }
         } else if (typeof errPayload === 'string' && errPayload.trim()) {
           errorMsg = errPayload
         }
@@ -383,7 +470,7 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
       throw new Error(errorMsg)
     }
 
-    const payload = await readResponsePayload(response)
+    const payload = await readResponsePayload(response, mime)
     let images: string[] = []
 
     if (responsePath === 'responses') {
